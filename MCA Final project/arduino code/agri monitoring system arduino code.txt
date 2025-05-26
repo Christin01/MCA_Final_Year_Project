@@ -1,0 +1,151 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#include <ESP32Servo.h>
+
+// WiFi credentials
+const char* ssid = "vivoT45G";
+const char* password = "chris123";
+
+// Server URL
+const char* serverURL = "http://192.168.239.106/MCA_Project/insert_data.php";
+
+// DHT Sensor Configuration
+#define DHTPIN 4  
+#define DHTTYPE DHT11  
+DHT dht(DHTPIN, DHTTYPE);
+
+// LCD Configuration
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// GPIO Pins
+#define PUMP_SERVO_PIN 18  // Servo motor (Pump Control)
+#define FAN_SERVO_PIN 19   // Servo motor (Fan Control)
+#define BUZZER_PIN 25  
+#define SOIL_MOISTURE_AO 34 
+#define SOIL_MOISTURE_DO 13 
+
+// Moisture & Temperature Thresholds
+#define MOISTURE_DRY_THRESHOLD 30  
+#define FAN_TEMPERATURE_THRESHOLD 31  // Fan turns ON at 29°C
+
+Servo pumpServo; // Servo for Pump
+Servo fanServo;  // Servo for Fan
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.begin(ssid, password);
+
+    Serial.print("Connecting to WiFi");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nConnected to WiFi");
+
+    dht.begin();
+    lcd.init();
+    lcd.backlight();
+
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(SOIL_MOISTURE_AO, INPUT);
+    pinMode(SOIL_MOISTURE_DO, INPUT);
+
+    pumpServo.attach(PUMP_SERVO_PIN);
+    fanServo.attach(FAN_SERVO_PIN);
+    
+    pumpServo.write(0); // Pump OFF
+    fanServo.write(0);  // Fan OFF
+
+    digitalWrite(BUZZER_PIN, LOW); // Buzzer OFF initially
+
+    lcd.setCursor(0, 0);
+    lcd.print("Smart Agri System");
+    delay(2000);
+    lcd.clear();
+}
+
+void loop() {
+    float temp = dht.readTemperature();
+    float hum = dht.readHumidity();
+    int soilMoistureValue = analogRead(SOIL_MOISTURE_AO);
+
+    if (isnan(temp) || isnan(hum)) {
+        Serial.println("Failed to read from DHT sensor!");
+        return;
+    }
+
+    int moisturePercent = map(soilMoistureValue, 0, 4095, 100, 0);
+    
+    bool pumpOn = false;
+    bool fanOn = false;
+    
+    // Pump Control (Servo Motor)
+    if (moisturePercent < MOISTURE_DRY_THRESHOLD) {
+        pumpServo.write(90); // Pump ON
+        digitalWrite(BUZZER_PIN, HIGH); // Buzzer ON
+        pumpOn = true;
+        Serial.println("Pump ON (Servo 90°), Buzzer ON");
+    } else {
+        pumpServo.write(0); // Pump OFF
+        digitalWrite(BUZZER_PIN, LOW); // Buzzer OFF
+        pumpOn = false;
+        Serial.println("Pump OFF (Servo 0°), Buzzer OFF");
+    }
+
+    // Fan Control (Servo Motor)
+    if (temp >= FAN_TEMPERATURE_THRESHOLD) {
+        fanServo.write(90); // Fan ON
+        fanOn = true;
+        Serial.println("Fan ON (Servo 90°) - Temp >= 29°C");
+    } else {
+        fanServo.write(0); // Fan OFF
+        fanOn = false;
+        Serial.println("Fan OFF (Servo 0°) - Temp < 29°C");
+    }
+
+    Serial.printf("Temp: %.2fC, Humidity: %.2f%%, Moisture: %d%%, Fan: %s, Pump: %s\n", 
+                  temp, hum, moisturePercent, 
+                  fanOn ? "ON" : "OFF", 
+                  pumpOn ? "ON" : "OFF");
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Temp:");
+    lcd.print(temp);
+    lcd.print("C ");
+
+    lcd.setCursor(9, 0);
+    lcd.print("Moist:");
+    lcd.print(moisturePercent);
+    lcd.print("%");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Pump:");
+    lcd.print(pumpOn ? "ON " : "OFF");
+    lcd.print(" Fan:");
+    lcd.print(fanOn ? "ON" : "OFF");
+
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+        String postData = "temperature=" + String(temp) +
+                          "&humidity=" + String(hum) +
+                          "&moisture=" + String(moisturePercent) +
+                          "&pump_status=" + String(pumpOn) +
+                          "&fan_status=" + String(fanOn) +
+                          "&buzzer_status=" + String(digitalRead(BUZZER_PIN) == HIGH);
+
+        http.begin(serverURL);
+        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+        int httpResponseCode = http.POST(postData);
+        Serial.print("Server Response: ");
+        Serial.println(httpResponseCode);
+
+        http.end();
+    }
+
+    delay(5000);
+}
